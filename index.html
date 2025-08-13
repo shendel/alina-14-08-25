@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>2.5D Game</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <style>
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(12px);} to { opacity: 1; transform: translateY(0);} }
+    @keyframes slideIn { from { opacity: 0; transform: translateX(-12px);} to { opacity: 1; transform: translateX(0);} }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    
+    .loading {
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+  </style>
+</head>
+
+<body class="bg-neutral-950 text-neutral-100 antialiased flex flex-col items-center min-h-screen py-10 space-y-6">
+  <!-- Title -->
+  <h1 class="text-3xl md:text-4xl font-semibold tracking-tight inline-flex items-center gap-3"
+      style="animation:fadeIn 0.7s ease-out forwards;">
+    <span>Isomeria</span>
+    <i data-lucide="compass" class="w-6 h-6 stroke-[1.5]"></i>
+  </h1>
+
+  <!-- Loading Screen -->
+  <div id="loadingScreen" class="flex flex-col items-center gap-4"
+       style="animation:fadeIn 0.7s ease-out forwards;">
+    <div class="flex items-center gap-2 px-4 py-2 rounded-md ring-1 ring-white/10 bg-neutral-800/30 backdrop-blur-md">
+      <div class="loading w-4 h-4 rounded-full bg-blue-500"></div>
+      <span>Загрузка текстур...</span>
+    </div>
+  </div>
+
+  <!-- Scoreboard -->
+  <div id="gameUI" class="flex items-center gap-2 hidden"
+       style="animation:slideIn 0.8s 0.2s ease-out forwards; opacity:0;">
+    <div id="scoreboard"
+         class="flex items-center gap-2 px-4 py-2 rounded-md ring-1 ring-white/10 bg-neutral-800/30 backdrop-blur-md text-sm font-medium">
+      <i data-lucide="sparkles" class="w-4 h-4 stroke-[1.5]"></i>
+      <span>Счёт:&nbsp;</span><span id="score">0</span>
+    </div>
+
+    <!-- Debug -->
+    <div id="debug"
+         class="flex items-center gap-1 px-3 py-1 rounded-md ring-1 ring-white/10 bg-neutral-800/30 backdrop-blur-md text-xs font-mono ml-3">
+      <i data-lucide="bug" class="w-4 h-4 stroke-[1.5]"></i>
+      <span id="coords">(0, 0)</span>
+      <span id="fps" class="ml-2 text-green-400">FPS: 60</span>
+    </div>
+  </div>
+
+  <!-- Game Canvas -->
+  <div id="gameContainer" class="relative hidden"
+       style="animation:fadeIn 0.9s 0.4s ease-out forwards; opacity:0;">
+    <canvas id="game"
+            class="rounded-lg ring-1 ring-white/10 bg-neutral-800"
+            width="800"
+            height="600"></canvas>
+  </div>
+
+  <!-- Help -->
+  <p id="helpText" class="text-neutral-400 text-xs md:text-sm max-w-xs text-center leading-relaxed hidden"
+     style="animation:slideIn 1s 0.6s ease-out forwards; opacity:0;">
+    Используйте стрелки клавиатуры или кликните по плитке, чтобы переместить куб и собирать кристаллы.
+  </p>
+
+  <script>
+    lucide.createIcons();
+
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const scoreboard = document.getElementById('score');
+    const coordsEl = document.getElementById('coords');
+    const fpsEl = document.getElementById('fps');
+    const ratio = window.devicePixelRatio || 1;
+    const loadingScreen = document.getElementById('loadingScreen');
+    const gameUI = document.getElementById('gameUI');
+    const gameContainer = document.getElementById('gameContainer');
+    const helpText = document.getElementById('helpText');
+
+    let width = canvas.width;
+    let height = canvas.height;
+
+    /* Game constants */
+    const MAP_SIZE = 10;
+    const TILE = 40;
+    const PATH_COLOR = 'rgba(56, 189, 248, 0.3)';
+    const MOVE_DURATION = 300; // Duration of smooth movement in ms
+    const DEBUG = true;
+    // --- Fog of War ---
+    const FOG_OPACITY_NEAR = 0.1; // Прозрачность стен рядом с игроком
+    const FOG_OPACITY_FAR = 1.0;  // Прозрачность остальных стен
+    const FOG_VISIBILITY_RADIUS = 3; // Радиус видимости в тайлах
+    const FOG_TRANSITION_DISTANCE = 1.0; // Расстояние для плавного перехода
+
+    /* Texture definitions */
+    const TEXTURES = {
+      floor: { color: '#27272a', pattern: null },
+      wall: { color: '#555', pattern: null },
+      player: { color: '#38bdf8', pattern: null },
+      crystal: { color: '#fbbf24', pattern: null },
+      path: { color: PATH_COLOR, pattern: null }
+    };
+
+    /* Texture URLs (in real projects, these will be image links) */
+    const TEXTURE_URLS = {
+      floor: null,   // Using colors for now
+      wall: null,
+      player: null,
+      crystal: null,
+      path: null
+    };
+
+    /* Projection helpers */
+    const isoX = (x, y) => (x - y) * TILE;
+    const isoY = (x, y) => (x + y) * TILE * 0.5;
+
+    /* Game state */
+    const gameState = {
+      player: {
+        x: 1,
+        y: 1,
+        targetX: 1,
+        targetY: 1,
+        moving: false,
+        moveStartTime: 0,
+        startX: 1,
+        startY: 1
+      },
+      crystal: { x: 3, y: 3 },
+      score: 0,
+      path: [],
+      isMoving: false,
+      map: [
+        [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        [1, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        [1, 0, 1, 0, 1, 0, 1, 0, 0, 1],
+        [1, 0, 0, 0, 0, 0, 0, 0, 1, 1],
+        [1, 0, 1, 0, 1, 0, 1, 0, 0, 1],
+        [1, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        [1, 0, 1, 0, 1, 0, 1, 0, 0, 1],
+        [1, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        [1, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+      ]
+    };
+
+    /* Input state */
+    const inputState = {
+      keys: {},
+      mouse: {
+        x: 0,
+        y: 0,
+        clicked: false
+      }
+    };
+
+    /* Game timing */
+    const gameTiming = {
+      lastTime: 0,
+      deltaTime: 0,
+      fps: 60,
+      frameCount: 0,
+      lastFpsUpdate: 0
+    };
+
+    /* Utility functions */
+    function updateDebug() {
+      coordsEl.textContent = `(${Math.round(gameState.player.x * 10) / 10}, ${Math.round(gameState.player.y * 10) / 10})`;
+    }
+
+    function updateFPS(currentTime) {
+      gameTiming.frameCount++;
+      if (currentTime - gameTiming.lastFpsUpdate >= 1000) {
+        gameTiming.fps = gameTiming.frameCount;
+        gameTiming.frameCount = 0;
+        gameTiming.lastFpsUpdate = currentTime;
+        fpsEl.textContent = `FPS: ${gameTiming.fps}`;
+      }
+    }
+
+    /* Texture loading system */
+    function loadTextures() {
+      return new Promise((resolve) => {
+        const texturePromises = [];
+        const loadedTextures = {};
+
+        // For demonstration, create simple textures from colors
+        Object.keys(TEXTURES).forEach(textureName => {
+          const textureData = TEXTURES[textureName];
+
+          // Create a simple texture from color
+          const textureCanvas = document.createElement('canvas');
+          const textureCtx = textureCanvas.getContext('2d');
+          textureCanvas.width = TILE;
+          textureCanvas.height = TILE;
+
+          // Fill with color
+          textureCtx.fillStyle = textureData.color;
+          textureCtx.fillRect(0, 0, TILE, TILE);
+
+          // Add pattern for walls
+          if (textureName === 'wall') {
+            textureCtx.strokeStyle = '#444';
+            textureCtx.lineWidth = 1;
+            textureCtx.beginPath();
+            textureCtx.moveTo(0, 0);
+            textureCtx.lineTo(TILE, TILE);
+            textureCtx.moveTo(TILE, 0);
+            textureCtx.lineTo(0, TILE);
+            textureCtx.stroke();
+          }
+
+          // Create pattern
+          const pattern = ctx.createPattern(textureCanvas, 'repeat');
+          textureData.pattern = pattern;
+          loadedTextures[textureName] = pattern;
+        });
+
+        // Simulate asynchronous loading
+        setTimeout(() => {
+          resolve(loadedTextures);
+        }, 500);
+      });
+    }
+
+    /* Resize canvas responsively */
+    function resize() {
+      width = canvas.clientWidth * ratio;
+      height = canvas.clientHeight * ratio;
+      canvas.width = width;
+      canvas.height = height;
+      render();
+    }
+    window.addEventListener('resize', resize);
+
+    /* Render system */
+    function drawTile(x, y, textureType = 'floor', fogOpacity = FOG_OPACITY_FAR) {
+      // Transform tile coordinates to isometric
+      const iso = toIso(x, y);
+
+      // Calculate camera offset for centering the player
+      const camera = getCameraOffset();
+
+      // Transform to screen coordinates
+      const screenX = iso.x - camera.x + canvas.width / 2;
+      const screenY = iso.y - camera.y + canvas.height / 2;
+
+      ctx.save(); // Сохраняем контекст перед изменением прозрачности
+      ctx.globalAlpha = fogOpacity; // Устанавливаем прозрачность
+
+      ctx.beginPath();
+      ctx.moveTo(screenX, screenY - TILE * 0.5);
+      ctx.lineTo(screenX + TILE, screenY);
+      ctx.lineTo(screenX, screenY + TILE * 0.5);
+      ctx.lineTo(screenX - TILE, screenY);
+      ctx.closePath();
+
+      // Use texture or color
+      const texture = TEXTURES[textureType];
+      if (texture && texture.pattern) {
+        ctx.fillStyle = texture.pattern;
+      } else {
+        ctx.fillStyle = texture ? texture.color : '#27272a';
+      }
+
+      ctx.fill();
+
+      if (textureType == 'wall') {
+        // Рисуем 3D стену
+        ctx.beginPath();
+        ctx.moveTo(screenX, screenY + TILE * 0.5);
+        ctx.lineTo(screenX, screenY - TILE);
+        ctx.lineTo(screenX - TILE, screenY - TILE - TILE * 0.5);
+        ctx.lineTo(screenX - TILE, screenY);
+        ctx.lineTo(screenX, screenY + TILE * 0.5);
+        ctx.lineTo(screenX + TILE, screenY);
+        ctx.lineTo(screenX + TILE, screenY - TILE - TILE * 0.5);
+        ctx.lineTo(screenX, screenY - TILE);
+        ctx.lineTo(screenX - TILE, screenY - TILE - TILE * 0.5);
+        ctx.lineTo(screenX, screenY - TILE - TILE);
+        ctx.lineTo(screenX + TILE, screenY - TILE - TILE * 0.5);
+        ctx.lineTo(screenX, screenY - TILE);
+        
+        if (texture && texture.pattern) {
+          ctx.fillStyle = texture.pattern;
+        } else {
+          ctx.fillStyle = texture ? texture.color : '#555';
+        }
+        ctx.fill();
+        ctx.closePath();
+        
+        ctx.strokeStyle = '#1c1c1e';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+      } else {
+        // Add outline for floor tiles
+        ctx.strokeStyle = '#1c1c1e';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      // Draw zIndex (depth)
+      if (DEBUG) {
+        ctx.font = '12px Arial';
+        ctx.fillStyle = 'white';
+        ctx.textAlign = 'center';
+        if (textureType == 'wall') {
+          ctx.fillText(`${x + y}`, screenX, screenY - TILE - TILE * 0.5); // Display depth as zIndex
+        } else {
+          ctx.fillText(`${x + y}`, screenX, screenY); // Display depth as zIndex
+        }
+      }
+
+      ctx.restore(); // Восстанавливаем контекст
+    }
+
+    // Isometric projection helpers
+    function toIso(x, y) {
+      return {
+        x: (x - y) * TILE,
+        y: (x + y) * TILE * 0.5
+      };
+    }
+
+    // Get camera offset for player centering
+    function getCameraOffset() {
+      const playerIso = toIso(gameState.player.x, gameState.player.y);
+      return {
+        x: playerIso.x,
+        y: playerIso.y
+      };
+    }
+
+    // --- Fog of War Logic ---
+    // Вычисляет плавную прозрачность для тайла на основе его положения относительно игрока
+    function calculateFogOpacity(tileX, tileY) {
+      // Позиция игрока (может быть дробной во время движения)
+      const playerX = gameState.player.x;
+      const playerY = gameState.player.y;
+      
+      // Вычисляем z-index для тайла и игрока
+      const tileDepth = tileX + tileY;
+      const playerDepth = Math.round(playerX) + Math.round(playerY);
+      
+      // Если тайл "перед" игроком (меньший z-index), делаем его прозрачным
+      if (tileDepth < playerDepth) {
+        return FOG_OPACITY_FAR;
+      }
+      
+      // Вычисляем расстояние от игрока до тайла
+      const dx = tileX - playerX;
+      const dy = tileY - playerY;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      
+      // Если тайл вне радиуса видимости, делаем его полностью прозрачным
+      if (distance > FOG_VISIBILITY_RADIUS) {
+        return FOG_OPACITY_FAR;
+      }
+      
+      // Плавный переход прозрачности в пределах радиуса видимости
+      // Когда distance = 0, opacity = FOG_OPACITY_NEAR
+      // Когда distance = FOG_VISIBILITY_RADIUS, opacity = FOG_OPACITY_FAR
+      
+      // Нормализуем расстояние от 0 до 1 в пределах радиуса видимости
+      const normalizedDistance = Math.max(0, Math.min(1, distance / FOG_VISIBILITY_RADIUS));
+      
+      // Применяем плавный переход
+      const smoothT = normalizedDistance * normalizedDistance;
+      return FOG_OPACITY_NEAR + (FOG_OPACITY_FAR - FOG_OPACITY_NEAR) * smoothT;
+    }
+
+    function drawPathTile(x, y) {
+      // Transform tile coordinates to isometric
+      const iso = toIso(x, y);
+
+      // Calculate camera offset for centering the player
+      const camera = getCameraOffset();
+
+      // Transform to screen coordinates
+      const screenX = iso.x - camera.x + canvas.width / 2;
+      const screenY = iso.y - camera.y + canvas.height / 2;
+
+      ctx.beginPath();
+      ctx.moveTo(screenX, screenY - TILE * 0.5);
+      ctx.lineTo(screenX + TILE, screenY);
+      ctx.lineTo(screenX, screenY + TILE * 0.5);
+      ctx.lineTo(screenX - TILE, screenY);
+      ctx.closePath();
+
+      const texture = TEXTURES['path'];
+      if (texture && texture.pattern) {
+        ctx.fillStyle = texture.pattern;
+      } else {
+        ctx.fillStyle = texture ? texture.color : PATH_COLOR;
+      }
+
+      ctx.fill();
+
+      // Add outline
+      ctx.strokeStyle = '#1c1c1e';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Draw zIndex (depth)
+      if (DEBUG) {
+        ctx.font = '12px Arial';
+        ctx.fillStyle = 'white';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${x + y}`, screenX, screenY);
+      }
+    }
+
+    function drawPlayer() {
+      // Get current player coordinates (with interpolation)
+      const iso = toIso(gameState.player.x, gameState.player.y);
+
+      // Calculate camera offset
+      const camera = getCameraOffset();
+
+      // Transform to screen coordinates
+      const screenX = iso.x - camera.x + canvas.width / 2;
+      const screenY = iso.y - camera.y + canvas.height / 2;
+
+      ctx.beginPath();
+      ctx.moveTo(screenX, screenY - TILE * 0.5); // Top point
+      ctx.lineTo(screenX + TILE, screenY);      // Right point
+      ctx.lineTo(screenX, screenY + TILE * 0.5); // Bottom point
+      ctx.lineTo(screenX - TILE, screenY);      // Left point
+      ctx.closePath();
+
+      const texture = TEXTURES['player'];
+      if (texture && texture.pattern) {
+        ctx.fillStyle = texture.pattern;
+      } else {
+        ctx.fillStyle = texture ? texture.color : '#38bdf8';
+      }
+
+      ctx.fill();
+
+      ctx.strokeStyle = '#1c1c1e';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      
+      // --------------
+
+      if (texture && texture.pattern) {
+        ctx.fillStyle = texture.pattern;
+      } else {
+        ctx.fillStyle = texture ? texture.color : '#555';
+      }
+      ctx.strokeStyle = '#1c1c1e';
+      ctx.lineWidth = 6;
+      ctx.stroke();
+      
+      ctx.fill();
+      ctx.closePath();
+      // ------------
+      // Draw zIndex (depth)
+      if (DEBUG) {
+        ctx.font = '12px Arial';
+        ctx.fillStyle = 'white';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${Math.round(gameState.player.x) + Math.round(gameState.player.y)}`, screenX, screenY);
+      }
+    }
+
+    function drawCrystal() {
+      // Transform crystal coordinates to isometric
+      const iso = toIso(gameState.crystal.x, gameState.crystal.y);
+
+      // Calculate camera offset
+      const camera = getCameraOffset();
+
+      // Transform to screen coordinates
+      const screenX = iso.x - camera.x + canvas.width / 2;
+      const screenY = iso.y - camera.y + canvas.height / 2;
+
+      ctx.beginPath();
+      ctx.moveTo(screenX, screenY - TILE * 0.5);
+      ctx.lineTo(screenX + TILE, screenY);
+      ctx.lineTo(screenX, screenY + TILE * 0.5);
+      ctx.lineTo(screenX - TILE, screenY);
+      ctx.closePath();
+
+      const texture = TEXTURES['crystal'];
+      if (texture && texture.pattern) {
+        ctx.fillStyle = texture.pattern;
+      } else {
+        ctx.fillStyle = texture ? texture.color : '#fbbf24';
+      }
+
+      ctx.fill();
+
+      ctx.strokeStyle = '#1c1c1e';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Draw zIndex (depth)
+      if (DEBUG) {
+        ctx.font = '12px Arial';
+        ctx.fillStyle = 'white';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${gameState.crystal.x + gameState.crystal.y}`, screenX, screenY);
+      }
+    }
+
+    function render() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Draw tiles by diagonal order
+      for (let depth = 0; depth < 2 * MAP_SIZE; depth++) {
+        for (let x = 0; x < MAP_SIZE; x++) {
+          const y = depth - x;
+          if (y >= 0 && y < MAP_SIZE) {
+            // --- Fog of War Check ---
+            let fogOpacity = FOG_OPACITY_FAR;
+            // Проверяем, если это стена или пол
+            if (gameState.map[y][x] === 1 || gameState.map[y][x] === 0) {
+              fogOpacity = calculateFogOpacity(x, y);
+            }
+            // --- End Fog of War ---
+
+            // Layer 1: Walls and floors with fog opacity
+            if (gameState.map[y][x] === 1) {
+              drawTile(x, y, 'wall', fogOpacity);
+            } else {
+              drawTile(x, y, 'floor', fogOpacity); // Полы тоже могут быть прозрачными
+            }
+
+            // Layer 2: Path
+            if (gameState.path.some(tile => tile.x === x && tile.y === y)) {
+              drawPathTile(x, y);
+            }
+
+            // Layer 3: Player and Crystal
+            // Проверяем, находится ли игрок в этой позиции (с учетом интерполяции)
+            if (Math.abs(gameState.player.x - x) < 0.5 && Math.abs(gameState.player.y - y) < 0.5) {
+              drawPlayer();
+            }
+            // Проверяем, находится ли кристалл в этой позиции
+            if (gameState.crystal.x === x && gameState.crystal.y === y) {
+              drawCrystal();
+            }
+          }
+        }
+      }
+    }
+
+    /* Game logic systems */
+    function spawnCrystal() {
+      let x, y;
+      do {
+        x = Math.floor(Math.random() * MAP_SIZE);
+        y = Math.floor(Math.random() * MAP_SIZE);
+      } while (gameState.map[y][x] === 1 || (x === Math.round(gameState.player.x) && y === Math.round(gameState.player.y)));
+      gameState.crystal.x = x;
+      gameState.crystal.y = y;
+    }
+
+    function collect() {
+      if (Math.abs(gameState.player.x - gameState.crystal.x) < 0.1 &&
+          Math.abs(gameState.player.y - gameState.crystal.y) < 0.1) {
+        gameState.score++;
+        scoreboard.textContent = gameState.score;
+        spawnCrystal();
+      }
+    }
+
+    /* Pathfinding system */
+    function findPath(start, end) {
+      if (gameState.map[end.y][end.x] === 1) return [];
+
+      const openSet = [];
+      const closedSet = new Set();
+      const cameFrom = new Map();
+
+      const gScore = Array(MAP_SIZE).fill().map(() => Array(MAP_SIZE).fill(Infinity));
+      const fScore = Array(MAP_SIZE).fill().map(() => Array(MAP_SIZE).fill(Infinity));
+
+      gScore[start.y][start.x] = 0;
+      fScore[start.y][start.x] = heuristic(start, end);
+
+      openSet.push({ x: start.x, y: start.y, f: fScore[start.y][start.x] });
+
+      while (openSet.length > 0) {
+        openSet.sort((a, b) => a.f - b.f);
+        const current = openSet.shift();
+
+        if (current.x === end.x && current.y === end.y) {
+          return reconstructPath(cameFrom, current);
+        }
+
+        closedSet.add(`${current.x},${current.y}`);
+
+        const neighbors = getNeighbors(current);
+        for (const neighbor of neighbors) {
+          if (closedSet.has(`${neighbor.x},${neighbor.y}`)) continue;
+
+          const tentativeGScore = gScore[current.y][current.x] + 1;
+
+          if (tentativeGScore < gScore[neighbor.y][neighbor.x]) {
+            cameFrom.set(`${neighbor.x},${neighbor.y}`, current);
+            gScore[neighbor.y][neighbor.x] = tentativeGScore;
+            fScore[neighbor.y][neighbor.x] = tentativeGScore + heuristic(neighbor, end);
+
+            if (!openSet.some(node => node.x === neighbor.x && node.y === neighbor.y)) {
+              openSet.push({ x: neighbor.x, y: neighbor.y, f: fScore[neighbor.y][neighbor.x] });
+            }
+          }
+        }
+      }
+
+      return [];
+    }
+
+    function heuristic(a, b) {
+      return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+    }
+
+    function getNeighbors(node) {
+      const neighbors = [];
+      const directions = [
+        { x: 0, y: -1 },
+        { x: 1, y: 0 },
+        { x: 0, y: 1 },
+        { x: -1, y: 0 }
+      ];
+
+      for (const dir of directions) {
+        const x = node.x + dir.x;
+        const y = node.y + dir.y;
+
+        if (x >= 0 && x < MAP_SIZE && y >= 0 && y < MAP_SIZE && gameState.map[y][x] === 0) {
+          neighbors.push({ x, y });
+        }
+      }
+
+      return neighbors;
+    }
+
+    function reconstructPath(cameFrom, current) {
+      const path = [current];
+      while (cameFrom.has(`${current.x},${current.y}`)) {
+        current = cameFrom.get(`${current.x},${current.y}`);
+        path.unshift(current);
+      }
+      return path.slice(1);
+    }
+
+    /* Smooth movement system */
+    function startMovement(targetX, targetY) {
+      if (gameState.player.moving) return;
+
+      gameState.player.moving = true;
+      gameState.player.startX = gameState.player.x;
+      gameState.player.startY = gameState.player.y;
+      gameState.player.targetX = targetX;
+      gameState.player.targetY = targetY;
+      gameState.player.moveStartTime = performance.now();
+    }
+
+    function updateMovement(currentTime) {
+      if (!gameState.player.moving) return;
+
+      const elapsed = currentTime - gameState.player.moveStartTime;
+      const progress = Math.min(elapsed / MOVE_DURATION, 1);
+
+      // Ease-in-out function for smoothness
+      const smoothProgress = progress < 0.5
+        ? 2 * progress * progress
+        : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+
+      // Interpolate position
+      gameState.player.x = gameState.player.startX +
+        (gameState.player.targetX - gameState.player.startX) * smoothProgress;
+      gameState.player.y = gameState.player.startY +
+        (gameState.player.targetY - gameState.player.startY) * smoothProgress;
+
+      // Finish movement
+      if (progress >= 1) {
+        gameState.player.moving = false;
+        gameState.player.x = gameState.player.targetX;
+        gameState.player.y = gameState.player.targetY;
+      }
+    }
+
+    /* Path movement system */
+    function moveAlongPath() {
+      if (!gameState.isMoving || gameState.path.length === 0) {
+        gameState.isMoving = false;
+        gameState.path = [];
+        return;
+      }
+
+      const nextStep = gameState.path.shift();
+      startMovement(nextStep.x, nextStep.y);
+
+      // Continue movement after finishing the current step
+      const checkMovement = () => {
+        if (!gameState.player.moving) {
+          collect();
+          updateDebug();
+
+          // If there are more steps, start the next one immediately
+          if (gameState.path.length > 0) {
+            const nextStep = gameState.path.shift();
+            startMovement(nextStep.x, nextStep.y);
+            requestAnimationFrame(checkMovement); // Continue checking
+          } else {
+            gameState.isMoving = false;
+          }
+        } else {
+          requestAnimationFrame(checkMovement);
+        }
+      };
+
+      checkMovement();
+    }
+
+    /* Input handling system */
+    function handleKeyboardInput() {
+      // Ignore input if the player is moving
+      if (gameState.player.moving || gameState.isMoving) return;
+
+      const { x, y } = gameState.player;
+      let newX = x;
+      let newY = y;
+      let moved = false;
+
+      if (inputState.keys['ArrowUp'] && y > 0) {
+        newY--;
+        moved = true;
+        inputState.keys['ArrowUp'] = false;
+      }
+      if (inputState.keys['ArrowDown'] && y < MAP_SIZE - 1) {
+        newY++;
+        moved = true;
+        inputState.keys['ArrowDown'] = false;
+      }
+      if (inputState.keys['ArrowLeft'] && x > 0) {
+        newX--;
+        moved = true;
+        inputState.keys['ArrowLeft'] = false;
+      }
+      if (inputState.keys['ArrowRight'] && x < MAP_SIZE - 1) {
+        newX++;
+        moved = true;
+        inputState.keys['ArrowRight'] = false;
+      }
+
+      if (moved && gameState.map[newY][newX] === 0) {
+        startMovement(newX, newY);
+        gameState.path = [];
+        updateDebug();
+      }
+    }
+
+    function handleMouseInput() {
+      if (!inputState.mouse.clicked) return;
+
+      // Cancel movement if the player is moving along a path
+      if (gameState.isMoving) {
+        gameState.isMoving = false;
+        gameState.path = [];
+        inputState.mouse.clicked = false;
+        return;
+      }
+
+      // Ignore input if the player is moving
+      if (gameState.player.moving) {
+        inputState.mouse.clicked = false;
+        return;
+      }
+
+      const rect = canvas.getBoundingClientRect();
+      const cx = inputState.mouse.x - rect.left;
+      const cy = inputState.mouse.y - rect.top;
+
+      // Calculate camera offset
+      const camera = getCameraOffset();
+
+      // Transform screen coordinates to isometric with camera offset
+      const dx = cx - canvas.width / 2 + camera.x;
+      const dy = cy - canvas.height / 2 + camera.y;
+
+      // Transform back to map coordinates
+      const mapX = Math.round((dx / TILE + dy / (TILE / 2)) / 2);
+      const mapY = Math.round((dy / (TILE / 2) - dx / TILE) / 2);
+
+      if (mapX >= 0 && mapX < MAP_SIZE && mapY >= 0 && mapY < MAP_SIZE) {
+        if (gameState.map[mapY][mapX] === 0) {
+          const path = findPath(
+            { x: Math.round(gameState.player.x), y: Math.round(gameState.player.y) },
+            { x: mapX, y: mapY }
+          );
+
+          if (path.length > 0) {
+            gameState.path = path;
+            gameState.isMoving = true;
+            moveAlongPath();
+          }
+          updateDebug();
+        }
+      }
+
+      inputState.mouse.clicked = false;
+    }
+
+    /* Game loop */
+    function gameLoop(currentTime) {
+      // Calculate delta time
+      gameTiming.deltaTime = currentTime - gameTiming.lastTime;
+      gameTiming.lastTime = currentTime;
+
+      // Update FPS counter
+      updateFPS(currentTime);
+
+      // Update smooth movement
+      updateMovement(currentTime);
+
+      // Handle input
+      handleKeyboardInput();
+      handleMouseInput();
+
+      // Collect crystals during movement
+      collect();
+
+      // Render everything
+      render();
+
+      // Continue the loop
+      requestAnimationFrame(gameLoop);
+    }
+
+    /* Event listeners */
+    window.addEventListener('keydown', (e) => {
+      inputState.keys[e.key] = true;
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+        e.preventDefault();
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      inputState.keys[e.key] = false;
+    });
+
+    canvas.addEventListener('click', (e) => {
+      inputState.mouse.x = e.clientX;
+      inputState.mouse.y = e.clientY;
+      inputState.mouse.clicked = true;
+    });
+
+    /* Game initialization */
+    async function initGame() {
+      try {
+        // Show loading screen
+        loadingScreen.style.display = 'flex';
+        gameUI.style.display = 'none';
+        gameContainer.style.display = 'none';
+        helpText.style.display = 'none';
+
+        // Load textures
+        await loadTextures();
+
+        // Hide loading screen and show the game
+        loadingScreen.style.display = 'none';
+        gameUI.style.display = 'flex';
+        gameContainer.style.display = 'block';
+        helpText.style.display = 'block';
+
+        // Initialize the game
+        resize();
+        updateDebug();
+        requestAnimationFrame(gameLoop);
+
+      } catch (error) {
+        console.error('Texture loading error:', error);
+        // In case of error, still run the game with colors
+        loadingScreen.style.display = 'none';
+        gameUI.style.display = 'flex';
+        gameContainer.style.display = 'block';
+        helpText.style.display = 'block';
+
+        resize();
+        updateDebug();
+        requestAnimationFrame(gameLoop);
+      }
+    }
+
+    /* Start the game */
+    initGame();
+  </script>
+</body>
+</html>
